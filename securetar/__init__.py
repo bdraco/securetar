@@ -75,8 +75,9 @@ class SecureTarFile:
         outer_tar = self._tar
         assert outer_tar
         tar_info = tarfile.TarInfo(name=name)
-        offset_before_inner = outer_tar.offset
+        tell_before_adding_inner_file_header = outer_tar.fileobj.tell()
         outer_tar.addfile(tar_info)
+        tell_after_adding_inner_file_header = outer_tar.fileobj.tell()
         # Remove the member from the tarfile, so we can add it later with the correct size
         outer_tar.members.pop()
         with SecureTarFile(
@@ -88,14 +89,14 @@ class SecureTarFile:
             fileobj=outer_tar.fileobj,
         ) as inner_tar:
             yield inner_tar
-            inner_tar_offset = inner_tar.offset
-        outer_tar.offset += inner_tar_offset
-        tar_info.size = inner_tar_offset
+            tell_after_writing_inner_tar = outer_tar.fileobj.tell()
+        tar_info.size = tell_after_writing_inner_tar - tell_after_adding_inner_file_header
         # Now that we know the size of the inner tar, we seek back
         # to where we started and re-add the member with the correct size
-        outer_tar.fileobj.seek(offset_before_inner)
-        outer_tar.addfile(tar_info)
-        outer_tar.fileobj.seek(self._tar.offset)
+        outer_tar.fileobj.seek(tell_before_adding_inner_file_header)
+        buf = tar_info.tobuf(outer_tar.format, outer_tar.encoding, outer_tar.errors)
+        outer_tar.fileobj.write(buf)
+        outer_tar.fileobj.seek(tell_after_writing_inner_tar)
 
     def __enter__(self) -> tarfile.TarFile:
         """Start context manager tarfile."""
