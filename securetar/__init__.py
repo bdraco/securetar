@@ -8,6 +8,7 @@ from typing import IO, Generator, Optional, Any
 from contextlib import contextmanager
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
+from copy import copy
 from cryptography.hazmat.primitives.ciphers import (
     Cipher,
     CipherContext,
@@ -23,6 +24,8 @@ DEFAULT_BUFSIZE = 10240
 
 MOD_READ = "r"
 MOD_WRITE = "w"
+
+EMPTY_TAR_INFO_BLOCK = tarfile.NUL * tarfile.BLOCKSIZE
 
 
 class SecureTarFile:
@@ -43,6 +46,7 @@ class SecureTarFile:
         self._name: Path = name
         self._bufsize: int = bufsize
         self._extra_args = {}
+        self._fileobj = fileobj
 
         # Tarfile options
         self._tar: Optional[tarfile.TarFile] = None
@@ -52,9 +56,6 @@ class SecureTarFile:
             self._tar_mode = f"{mode}:"
             if gzip:
                 self._extra_args["compresslevel"] = 6
-
-        if fileobj:
-            self._extra_args["fileobj"] = fileobj
 
         if gzip:
             self._tar_mode = self._tar_mode + "gz"
@@ -69,56 +70,75 @@ class SecureTarFile:
 
     @contextmanager
     def create_inner_tar(
-        self, name: str, gzip: bool = True
+        self, name: str, key: Optional[bytes] = None, gzip: bool = True
     ) -> Generator[Any, Any, tarfile.TarFile]:
         """Create inner tar file."""
         outer_tar = self._tar
         assert outer_tar
-        tar_info = tarfile.TarInfo(name=name)
-        tell_before_adding_inner_file_header = outer_tar.fileobj.tell()
-        outer_tar.addfile(tar_info)
-        tell_after_adding_inner_file_header = outer_tar.fileobj.tell()
-        # Remove the member from the tarfile, so we can add it later with the correct size
-        outer_tar.members.pop()
+        fileobj = outer_tar.fileobj
+        offset_before_adding_inner_file_header = outer_tar.offset
+        # Write an empty header for the inner tar file
+        # We'll seek back to this position later to update the header with the correct size
+        fileobj.write(EMPTY_TAR_INFO_BLOCK)
         with SecureTarFile(
             name=Path(name),
             mode=self._mode,
-            key=self._key,
+            key=key,
             gzip=gzip,
             bufsize=self._bufsize,
-            fileobj=outer_tar.fileobj,
+            fileobj=fileobj,
         ) as inner_tar:
             yield inner_tar
-            tell_after_writing_inner_tar = outer_tar.fileobj.tell()
-        tar_info.size = tell_after_writing_inner_tar - tell_after_adding_inner_file_header
+
+        # Pad the outer tar file to a multiple of BLOCKSIZE
+        # in case the inner tar file is not a multiple of BLOCKSIZE
+        size_of_inner_tar = inner_tar.offset
+        blocks, remainder = divmod(size_of_inner_tar, tarfile.BLOCKSIZE)
+        if remainder > 0:
+            fileobj.write(tarfile.NUL * (tarfile.BLOCKSIZE - remainder))
+            blocks += 1
+        outer_tar.offset += blocks * tarfile.BLOCKSIZE
+
+        tar_info = tarfile.TarInfo(name=name)
+        tar_info.size = size_of_inner_tar
         # Now that we know the size of the inner tar, we seek back
         # to where we started and re-add the member with the correct size
-        outer_tar.fileobj.seek(tell_before_adding_inner_file_header)
-        buf = tar_info.tobuf(outer_tar.format, outer_tar.encoding, outer_tar.errors)
-        outer_tar.fileobj.write(buf)
-        outer_tar.fileobj.seek(tell_after_writing_inner_tar)
+        fileobj.seek(offset_before_adding_inner_file_header)
+        outer_tar.addfile(tar_info)
+
+        # Finally return to the end of the outer tar file
+        fileobj.seek(outer_tar.offset)
 
     def __enter__(self) -> tarfile.TarFile:
         """Start context manager tarfile."""
         if not self._key:
+            file_obj_args = {}
+            if self._fileobj:
+                file_obj_args = {"fileobj": self._fileobj}
             self._tar = tarfile.open(
                 name=str(self._name),
                 mode=self._tar_mode,
                 dereference=False,
                 bufsize=self._bufsize,
                 **self._extra_args,
+                **file_obj_args,
             )
             return self._tar
 
         # Encrypted/Decrypted Tarfile
-        read_mode = self._mode.startswith("r")
-        if read_mode:
-            file_mode: int = os.O_RDONLY
-        else:
-            file_mode: int = os.O_WRONLY | os.O_CREAT
 
-        fd = os.open(self._name, file_mode, 0o666)
-        self._file = os.fdopen(fd, "rb" if read_mode else "wb")
+        if self._fileobj:
+            # If we have a fileobj, we don't need to open a file
+            self._file = self._fileobj
+        else:
+            read_mode = self._mode.startswith("r")
+            if read_mode:
+                file_mode: int = os.O_RDONLY
+            else:
+                file_mode: int = os.O_WRONLY | os.O_CREAT
+
+            fd = os.open(self._name, file_mode, 0o666)
+            self._file = os.fdopen(fd, "rb" if read_mode else "wb")
 
         # Extract IV for CBC
         if self._mode == MOD_READ:
@@ -142,7 +162,6 @@ class SecureTarFile:
             mode=self._tar_mode,
             dereference=False,
             bufsize=self._bufsize,
-            **self._extra_args,
         )
         return self._tar
 
@@ -152,7 +171,8 @@ class SecureTarFile:
             self._tar.close()
             self._tar = None
         if self._file:
-            self._file.close()
+            if not self._fileobj:
+                self._file.close()
             self._file = None
 
     def write(self, data: bytes) -> None:
