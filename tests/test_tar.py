@@ -156,22 +156,17 @@ def test_gzipped_tar_inside_tar(tmp_path: Path) -> None:
 
     # Create Tarfile
     main_tar = tmp_path.joinpath("backup.tar")
+    inner_tgz_files =  ("core.tar.gz", "core2.tar.gz", "core3.tar.gz")
     outer_secure_tar_file = SecureTarFile(main_tar, "w", gzip=False)
     with outer_secure_tar_file as outer_tar_file:
-        with outer_secure_tar_file.create_inner_tar("core.tar.gz", gzip=True) as inner_tar_file:
-            atomic_contents_add(
-                inner_tar_file,
-                temp_orig,
-                excludes=[],
-                arcname=".",
-            )
-        with outer_secure_tar_file.create_inner_tar("core2.tar.gz", gzip=True) as inner_tar_file:
-            atomic_contents_add(
-                inner_tar_file,
-                temp_orig,
-                excludes=[],
-                arcname=".",
-            )
+        for inner_tgz_file in inner_tgz_files:
+            with outer_secure_tar_file.create_inner_tar(inner_tgz_file, gzip=True) as inner_tar_file:
+                atomic_contents_add(
+                    inner_tar_file,
+                    temp_orig,
+                    excludes=[],
+                    arcname=".",
+                )
 
 
     assert main_tar.exists()
@@ -184,9 +179,10 @@ def test_gzipped_tar_inside_tar(tmp_path: Path) -> None:
     assert temp_new.is_dir()
     assert temp_new.joinpath("core.tar.gz").is_file()
     assert temp_new.joinpath("core2.tar.gz").is_file()
+    assert temp_new.joinpath("core3.tar.gz").is_file()
 
     # Extract inner tars
-    for inner_tgz in ("core.tar.gz", "core2.tar.gz"):
+    for inner_tgz in inner_tgz_files:
         temp_inner_new = tmp_path.joinpath("{inner_tgz}_inner_new")
 
         with SecureTarFile(temp_new.joinpath(inner_tgz), "r", gzip=True) as tar_file:
