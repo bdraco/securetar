@@ -112,16 +112,13 @@ class SecureTarFile:
     def __enter__(self) -> tarfile.TarFile:
         """Start context manager tarfile."""
         if not self._key:
-            file_obj_args = {}
-            if self._fileobj:
-                file_obj_args = {"fileobj": self._fileobj}
             self._tar = tarfile.open(
                 name=str(self._name),
                 mode=self._tar_mode,
                 dereference=False,
                 bufsize=self._bufsize,
                 **self._extra_args,
-                **file_obj_args,
+                **({"fileobj": self._fileobj} if self._fileobj else {}),
             )
             return self._tar
 
